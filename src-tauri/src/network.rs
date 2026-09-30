@@ -4,7 +4,8 @@ use libp2p::{
     noise,
     request_response::{self, ProtocolSupport},
     swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, yamux, Multiaddr, PeerId, SwarmBuilder, StreamProtocol
+    tcp, yamux, Multiaddr, PeerId, SwarmBuilder, StreamProtocol,
+    mdns
 };
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
@@ -30,6 +31,7 @@ pub struct NirakarBehaviour {
     pub kademlia: Kademlia<MemoryStore>,
     pub request_response: request_response::cbor::Behaviour<ChatMessageReq, ChatMessageRes>,
     pub stream: stream::Behaviour,
+    pub mdns: mdns::tokio::Behaviour,
 }
 
 #[derive(Debug, serde::Serialize, Clone)]
@@ -78,10 +80,13 @@ pub fn start_network(
                 request_response::Config::default(),
             );
             
+            let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), key.public().to_peer_id()).unwrap();
+            
             NirakarBehaviour {
                 kademlia: Kademlia::with_config(key.public().to_peer_id(), store, cfg),
                 request_response: req_res,
                 stream: stream::Behaviour::new(),
+                mdns,
             }
         }).unwrap()
         .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(60)))
@@ -326,6 +331,22 @@ pub fn start_network(
                             request_response::Message::Response { .. } => {
                                 // Handled delivery
                             }
+                        }
+                    }
+                    SwarmEvent::Behaviour(NirakarBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
+                        for (peer_id, multiaddr) in list {
+                            swarm.behaviour_mut().kademlia.add_address(&peer_id, multiaddr);
+                            let _ = swarm.dial(peer_id);
+                            app.emit("network_status", NetworkStatus {
+                                status: "Discovered".to_string(),
+                                peer_id: peer_id.to_string(),
+                                message: "Discovered peer on local network".to_string(),
+                            }).ok();
+                        }
+                    }
+                    SwarmEvent::Behaviour(NirakarBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
+                        for (peer_id, multiaddr) in list {
+                            swarm.behaviour_mut().kademlia.remove_address(&peer_id, &multiaddr);
                         }
                     }
                     _ => {}
